@@ -165,14 +165,17 @@ async def _process_text(message: Message, text: str) -> None:
 
 def _transcribe(audio_bytes: bytes) -> str:
     """رونویسی ویس با خود Gemini (ورودی صوتی)."""
-    import google.generativeai as genai
-    genai.configure(api_key=settings.gemini_api_key)
-    model = genai.GenerativeModel(settings.gemini_model)
-    resp = model.generate_content([
-        {"mime_type": "audio/ogg", "data": audio_bytes},
-        "این ویس فارسی را دقیق رونویسی کن. فقط متن رونویسی را برگردان.",
-    ])
-    return resp.text.strip()
+    from google import genai as genai_new
+    from google.genai import types as genai_types_new
+    client = genai_new.Client(api_key=settings.gemini_api_key)
+    resp = client.models.generate_content(
+        model=settings.gemini_model,
+        contents=[
+            genai_types_new.Part.from_bytes(data=audio_bytes, mime_type="audio/ogg"),
+            "این ویس فارسی را دقیق رونویسی کن. فقط متن رونویسی را برگردان.",
+        ],
+    )
+    return (resp.text or "").strip()
 
 
 async def main() -> None:

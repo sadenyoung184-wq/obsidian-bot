@@ -11,9 +11,11 @@ import re
 from datetime import datetime
 
 try:
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types as genai_types
 except ImportError:  # اجازه بده حالت fallback بدون نصب پکیج هم کار کند
     genai = None  # type: ignore
+    genai_types = None  # type: ignore
 from zoneinfo import ZoneInfo
 
 from config import settings
@@ -50,22 +52,30 @@ SYSTEM_PROMPT = """تو دستیار هوشمند یک کاربر فارسی‌�
 - keywords: ۳ تا ۷ کلمه مهم پیام برای پیدا کردن نوت‌های مرتبط قدیمی.
 """
 
-_model = None
+_client = None
 
 
-def _get_model():
-    global _model
-    if _model is None:
-        genai.configure(api_key=settings.gemini_api_key)
-        _model = genai.GenerativeModel(
-            settings.gemini_model,
-            system_instruction=SYSTEM_PROMPT.format(
-                now=datetime.now(ZoneInfo(settings.timezone)).isoformat(timespec="minutes"),
-                tz=settings.timezone,
-            ),
-            generation_config={"response_mime_type": "application/json"},
-        )
-    return _model
+def _system_text() -> str:
+    return SYSTEM_PROMPT.format(
+        now=datetime.now(ZoneInfo(settings.timezone)).isoformat(timespec="minutes"),
+        tz=settings.timezone,
+    )
+
+
+def _get_client():
+    global _client
+    if _client is None:
+        _client = genai.Client(api_key=settings.gemini_api_key)
+    return _client
+
+
+def _strip_fences(raw: str) -> str:
+    """حذف ```json ... ``` که بعضی مدل‌ها دور JSON می‌گذارند."""
+    raw = (raw or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+    return raw.strip()
 
 
 def analyze(text: str) -> dict:
@@ -74,8 +84,15 @@ def analyze(text: str) -> dict:
     if not settings.gemini_api_key or genai is None:
         return fallback
     try:
-        resp = _get_model().generate_content(text)
-        data = json.loads(resp.text)
+        resp = _get_client().models.generate_content(
+            model=settings.gemini_model,
+            contents=text,
+            config=genai_types.GenerateContentConfig(
+                system_instruction=_system_text(),
+                response_mime_type="application/json",
+            ),
+        )
+        data = json.loads(_strip_fences(resp.text or ""))
         return _normalize(data, text)
     except Exception as exc:  # قطع بودن API نباید ربات را بخواباند
         log.warning("Gemini failed, using fallback: %s", exc)
@@ -87,10 +104,14 @@ def ask(question: str) -> str:
     if genai is None or not settings.gemini_api_key:
         return "الان به هوش مصنوعی دسترسی ندارم، ولی پیامت را در Inbox ذخیره کردم. بعداً دوباره بپرس."
     try:
-        resp = _get_model().generate_content(
-            "به این سوال به فارسی، کوتاه و کاربردی جواب بده:\n" + question
+        resp = _get_client().models.generate_content(
+            model=settings.gemini_model,
+            contents="به این سوال به فارسی، کوتاه و کاربردی جواب بده:\n" + question,
+            config=genai_types.GenerateContentConfig(
+                system_instruction=_system_text(),
+            ),
         )
-        return resp.text.strip()
+        return (resp.text or "").strip()
     except Exception as exc:
         log.warning("Gemini ask failed: %s", exc)
         return "الان به هوش مصنوعی دسترسی ندارم، ولی پیامت را در Inbox ذخیره کردم. بعداً دوباره بپرس."
