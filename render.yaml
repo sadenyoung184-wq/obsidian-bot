@@ -1,0 +1,27 @@
+# Render Blueprint — استقرار با چند کلیک.
+# در Render: New → Blueprint → انتخاب ریپوی همین پروژه → مقادیر sync:false را وارد کن.
+services:
+  - type: worker
+    name: obsidian-assistant-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ALLOWED_USER_IDS
+        sync: false
+      - key: GIT_REPO_URL
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.0-flash
+      - key: VAULT_PATH
+        value: ./MyVault
+      - key: TIMEZONE
+        value: Asia/Tehran
+      - key: GIT_SYNC_ENABLED
+        value: "true"
+      - key: GIT_BRANCH
+        value: main
