@@ -25,7 +25,7 @@ class Settings:
         default_factory=lambda: _parse_ids(os.getenv("ALLOWED_USER_IDS", ""))
     )
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     vault_path: str = os.getenv("VAULT_PATH", "./MyVault")
     timezone: str = os.getenv("TIMEZONE", "Asia/Tehran")
     # --- سینک گیت (برای هاست ابری: نوت‌ها به ریپوی گیت‌هاب پوش می‌شوند) ---
