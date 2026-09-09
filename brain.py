@@ -56,10 +56,11 @@ _client = None
 
 
 def _system_text() -> str:
-    return SYSTEM_PROMPT.format(
-        now=datetime.now(ZoneInfo(settings.timezone)).isoformat(timespec="minutes"),
-        tz=settings.timezone,
-    )
+    # NOTE: از replace استفاده می‌کنیم نه format — چون خود پرامپت نمونه JSON
+    # با آکولاد دارد و format آن‌ها را با placeholder اشتباه می‌گیرد
+    # (همین باگ باعث KeyError روی "type" و fallback دائمی بود).
+    now = datetime.now(ZoneInfo(settings.timezone)).isoformat(timespec="minutes")
+    return SYSTEM_PROMPT.replace("{now}", now).replace("{tz}", settings.timezone)
 
 
 def _get_client():
@@ -92,7 +93,9 @@ def analyze(text: str) -> dict:
                 response_mime_type="application/json",
             ),
         )
-        data = json.loads(_strip_fences(resp.text or ""))
+        data = json.loads(_strip_fences(resp.text or ""), strict=False)
+        if not isinstance(data, dict):
+            raise ValueError(f"expected JSON object, got: {str(data)[:100]}")
         return _normalize(data, text)
     except Exception as exc:  # قطع بودن API نباید ربات را بخواباند
         log.warning("Gemini failed, using fallback: %s", exc)
