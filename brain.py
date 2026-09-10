@@ -216,6 +216,92 @@ def revise_draft(draft_result: dict, raw_text: str, feedback: str) -> dict | Non
         return None
 
 
+IMAGE_PROMPT = """این تصویر را برای یک کاربر فارسی‌زبان تحلیل کن.
+
+اگر تصویر متن دارد (جزوه، اسلاید، برگه امتحان، تابلو، نسخه، رسید):
+کل متن را دقیق رونویسی کن (OCR) — ساختار و تیترها حفظ شود.
+
+بعد فقط و فقط یک JSON معتبر با همین کلیدها برگردان (بدون توضیح اضافه، بدون ```):
+{
+  "title": "عنوان کوتاه فارسی",
+  "folder": "Classes" | "Events" | "Reviews" | "Tasks" | "Reminders" | "Ideas" | "Journal" | "Inbox",
+  "body": "متن کامل رونویسی‌شده + خلاصه ساخت‌یافته به مارک‌داون فارسی",
+  "tags": ["تگ۱", "تگ۲"],
+  "keywords": ["کلمات کلیدی برای لینک‌سازی"],
+  "related_paths": ["مسیر نوت‌های مرتبط از حافظه"],
+  "ocr_text": "متن خام رونویسی (اگر متنی نیست، رشته خالی)",
+  "has_text": true یا false (آیا تصویر متن قابل رونویسی دارد؟),
+  "tracker": true یا false,
+  "reply": "پاسخ کوتاه و صمیمی به فارسی: متن بود یا نه و چه چیزی ذخیره شد"
+}
+
+راهنما:
+- جزوه/درس/آموزش → folder=Classes
+- برگه امتحان/کارنامه → folder=Reviews
+- تابلو اعلانات/پوستر رویداد → folder=Events
+- دست‌نوشته روزانه/خاطره → folder=Journal
+- اگر تصویر متن ندارد (منظره، عکس شخصی) → body=توصیف کوتاه تصویر، has_text=false
+- کپشن کاربر: {caption}
+"""
+
+
+def describe_image(image_bytes: bytes, mime_type: str, caption: str = "") -> dict | None:
+    """تحلیل تصویر + OCR با Gemini. خروجی: دیکشنری نرمال‌شده یا None."""
+    if genai is None or not settings.gemini_api_key:
+        return None
+    from google.genai import types as _types
+    prompt = IMAGE_PROMPT.replace("{caption}", caption or "بدون کپشن")
+    last_exc: Exception | None = None
+    for model in _candidate_models():
+        try:
+            resp = _get_client().models.generate_content(
+                model=model,
+                contents=[
+                    _types.Part.from_bytes(data=image_bytes, mime_type=mime_type or "image/jpeg"),
+                    prompt,
+                ],
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=_system_text(),
+                    response_mime_type="application/json",
+                ),
+            )
+            data = json.loads(_strip_fences(resp.text or ""), strict=False)
+            if not isinstance(data, dict):
+                raise ValueError("expected JSON object from image analysis")
+            out = _normalize({
+                "type": "log",
+                "title": data.get("title") or (caption or "عکس")[:40],
+                "folder": data.get("folder") or "Inbox",
+                "body": data.get("body") or "",
+                "tags": data.get("tags") or [],
+                "keywords": data.get("keywords") or [],
+                "related_paths": data.get("related_paths") or [],
+                "due": None, "remind_at": None,
+                "tracker": bool(data.get("tracker", False)),
+                "reply": data.get("reply") or "ذخیره شد ✅",
+            }, caption or "عکس")
+            out["ocr_text"] = str(data.get("ocr_text") or "")
+            out["has_text"] = bool(data.get("has_text", False))
+            out["type"] = _image_type(out)
+            return out
+        except Exception as exc:
+            if "404" in str(exc) or "NOT_FOUND" in str(exc):
+                log.warning("Model %s not available for image, trying next", model)
+                last_exc = exc
+                continue
+            log.warning("Image analysis failed: %s", exc)
+            return None
+    log.warning("Image analysis failed: %s", last_exc)
+    return None
+
+
+def _image_type(out: dict) -> str:
+    folder = out.get("folder")
+    return {"Classes": "class", "Events": "event", "Reviews": "review",
+            "Tasks": "task", "Reminders": "reminder", "Ideas": "idea",
+            "Journal": "log"}.get(folder, "log")
+
+
 def ask(question: str) -> str:
     """گفت‌وگوی آزاد (برای type=question هم استفاده می‌شود)."""
     if genai is None or not settings.gemini_api_key:

@@ -94,6 +94,8 @@ async def cmd_start(message: Message):
         "/draft — حالت پیش‌نویس\n"
         "/notes [پوشه] — فهرست نوت‌ها\n"
         "/read <مسیر> — خواندن نوت\n"
+        "🖼 عکس بفرست → متن داخلش استخراج (OCR) و نوت می‌شود\n"
+        "📎 فایل بفرست (PDF/Word/صوت...) → در Files ذخیره و نوت می‌شود\n"
         "/today — ترکر امروز\n"
         "/memory — بازسازی حافظه والت\n"
         "/help — راهنما"
@@ -110,7 +112,9 @@ async def cmd_help(message: Message):
         "• «نوت X را پاک کن» → اول نشان می‌دهم، با تایید حذف می‌شود\n"
         "• «پوشه Dreams بساز» → با تایید ساخته می‌شود\n"
         "• «نوت X را به پوشه Y منتقل کن» → مدیریتی با تایید\n\n"
-        "عکس (با کپشن) و ویس هم مثل قبل کار می‌کند."
+        "عکس (با کپشن) → OCR فارسی + تحلیل و ذخیره در Assets.\n"
+        "فایل (PDF، Word، صوت، ...) تا ۲۰MB → ذخیره در Files + نوت معرفی.\n"
+        "ویس هم مثل قبل رونویسی و ذخیره می‌شود."
     )
 
 
@@ -269,18 +273,127 @@ async def handle_voice(message: Message):
     await _process_text(message, text or "(ویس بدون متن)")
 
 
+# پسوندهای فایل مجاز برای ذخیره در والت (متن/سند/صوت/ویدیو کوتاه)
+ALLOWED_DOC_EXTS = {
+    ".pdf", ".txt", ".md", ".doc", ".docx", ".ppt", ".pptx",
+    ".xls", ".xlsx", ".csv", ".zip", ".mp3", ".ogg", ".wav",
+    ".m4a", ".mp4", ".jpg", ".jpeg", ".png", ".gif", ".webp",
+}
+MAX_DOC_MB = 20
+
+
+def _save_incoming_file(data: bytes, original_name: str, subfolder: str) -> Path | None:
+    """فایل ورودی تلگرام را امن در والت ذخیره کن. خروجی: مسیر یا None."""
+    safe = "".join(c for c in (original_name or "file") if c not in '\\/:*?"<>|').strip() or "file"
+    ext = Path(safe).suffix.lower()
+    if ext and ext not in ALLOWED_DOC_EXTS:
+        return None
+    folder = vault.root / subfolder
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = vault.now().strftime("%Y-%m-%d-%H%M%S")
+    dest = folder / f"{stamp}-{safe[:50]}"
+    counter = 2
+    while dest.exists():
+        dest = folder / f"{stamp}-{counter}-{safe[:50]}"
+        counter += 1
+    dest.write_bytes(data)
+    return dest
+
+
 @dp.message(F.photo)
 async def handle_photo(message: Message):
     if not _allowed(message):
         return
-    caption = message.caption or "عکس بدون کپشن"
-    assets = vault.root / "Assets"
-    assets.mkdir(parents=True, exist_ok=True)
+    caption = message.caption or ""
     photo = message.photo[-1]
-    fname = f"{vault.now().strftime('%Y-%m-%d-%H%M%S')}.jpg"
-    dest = assets / fname
-    await bot.download(photo.file_id, destination=dest)
-    await _process_text(message, f"{caption}\n\n![[{dest.relative_to(vault.root).as_posix()}]]")
+    buf = io.BytesIO()
+    await bot.download(photo.file_id, destination=buf)
+    img_bytes = buf.getvalue()
+    if not img_bytes:
+        await message.answer("عکس خالی رسید، دوباره بفرست.")
+        return
+    status = await message.answer("🖼 دارم عکس را می‌خوانم (OCR + تحلیل)...")
+    try:
+        dest = _save_incoming_file(img_bytes, "photo.jpg", "Assets")
+        if dest is None:
+            await status.edit_text("فرمت عکس پشتیبانی نمی‌شود.")
+            return
+        rel = dest.relative_to(vault.root).as_posix()
+        result = await asyncio.to_thread(brain.describe_image, img_bytes, "image/jpeg", caption)
+        if result is None:
+            # Gemini در دسترس نیست → مثل قبل فقط ذخیره کن
+            await status.delete()
+            text = (caption + "\n\n" if caption else "") + f"![[{rel}]]"
+            await _process_text(message, text or f"![[{rel}]]")
+            return
+        ocr = (result.get("ocr_text") or "").strip()
+        body = (result.get("body") or "").strip()
+        if ocr:
+            body = f"{body}\n\n---\n\n## 📝 متن استخراج‌شده (OCR)\n\n{ocr}"
+        text = ((caption + "\n\n") if caption else "") + f"![[{rel}]]\n\n" + body
+        # تحلیل مجدد متنی تا در پوشه درست + با لینک‌سازی ذخیره شود
+        await status.delete()
+        await _process_text(message, text)
+    except Exception as exc:
+        log.exception("photo failed")
+        await status.edit_text(f"عکس ذخیره شد ولی تحلیل نشد: {exc}")
+
+
+@dp.message(F.document)
+async def handle_document(message: Message):
+    if not _allowed(message):
+        return
+    doc = message.document
+    name = doc.file_name or "file"
+    size_mb = (doc.file_size or 0) / (1024 * 1024)
+    if size_mb > MAX_DOC_MB:
+        await message.answer(f"❌ فایل خیلی بزرگ است ({size_mb:.0f}MB). سقف {MAX_DOC_MB}MB است.")
+        return
+    caption = message.caption or ""
+    status = await message.answer("📎 دارم فایل را ذخیره می‌کنم...")
+    try:
+        buf = io.BytesIO()
+        await bot.download(doc.file_id, destination=buf)
+        data = buf.getvalue()
+        if not data:
+            await status.edit_text("فایل خالی رسید.")
+            return
+        ext = Path(name).suffix.lower()
+        # عکسِ فرستاده‌شده به‌صورت فایل → همان مسیر OCR
+        if ext in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
+            await status.delete()
+            result = await asyncio.to_thread(brain.describe_image, data, "image/jpeg", caption or name)
+            dest = _save_incoming_file(data, name, "Assets")
+            if dest is None:
+                await message.answer("فرمت فایل پشتیبانی نمی‌شود.")
+                return
+            rel = dest.relative_to(vault.root).as_posix()
+            if result is None:
+                await _process_text(message, f"{caption or name}\n\n![[{rel}]]")
+                return
+            ocr = (result.get("ocr_text") or "").strip()
+            body = (result.get("body") or "").strip()
+            if ocr:
+                body = f"{body}\n\n---\n\n## 📝 متن استخراج‌شده (OCR)\n\n{ocr}"
+            tmp_msg = await message.answer("🖼 متن عکس استخراج شد، دارم ذخیره می‌کنم...")
+            await _process_text(message, f"{caption or name}\n\n![[{rel}]]\n\n{body}")
+            await tmp_msg.delete()
+            return
+        # بقیه فایل‌ها (PDF، ورد، صوت...) → ذخیره + نوت معرفی
+        dest = _save_incoming_file(data, name, "Files")
+        if dest is None:
+            await status.edit_text(f"❌ فرمت `{ext or '?'}` پشتیبانی نمی‌شود.")
+            return
+        await status.delete()
+        rel = dest.relative_to(vault.root).as_posix()
+        note_text = f"فایل: {name} ({size_mb:.1f}MB)\n"
+        if caption:
+            note_text += f"توضیح: {caption}\n"
+        note_text += f"\n![[{rel}]]"
+        await _process_text(message, note_text)
+    except Exception as exc:
+        log.exception("document failed")
+        await status.edit_text(f"خطا در ذخیره فایل: {exc}")
 
 
 @dp.message(F.text)
