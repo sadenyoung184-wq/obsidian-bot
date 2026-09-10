@@ -145,6 +145,159 @@ class ObsidianVault:
             except OSError:
                 log.warning("Could not update backlink in %s", old)
 
+    # ---------- عملیات مدیریتی (type=manage) ----------
+
+    def _safe_path(self, rel: str) -> Path | None:
+        """مسیر نسبی را به مسیر امن داخل والت تبدیل کن؛ خروج از والت → None."""
+        rel = (rel or "").strip()
+        if not rel or rel.startswith(("/", "\\", ".", "~")):
+            return None
+        rel = rel.replace("\\", "/")
+        if "/../" in f"/{rel}/" or rel in (".", ".."):
+            return None
+        try:
+            p = (self.root / rel).resolve()
+            p.relative_to(self.root.resolve())
+        except (ValueError, OSError):
+            return None
+        return p
+
+    def _after_change(self, message: str) -> None:
+        """بعد از هر تغییر: ایندکس حافظه را تازه کن + به گیت پوش کن."""
+        try:
+            from memory import refresh_index
+            refresh_index(self.root)
+        except Exception:
+            log.warning("memory refresh failed", exc_info=True)
+        try:
+            from git_sync import sync_changes
+            sync_changes(self.root, message)
+        except Exception:
+            log.warning("git sync failed, continuing locally", exc_info=True)
+
+    def read_note(self, rel_path: str, max_chars: int = 4000) -> str | None:
+        p = self._safe_path(rel_path)
+        if p is None or not p.is_file():
+            return None
+        try:
+            return p.read_text(encoding="utf-8")[:max_chars]
+        except OSError:
+            return None
+
+    def write_note(self, rel_path: str, content: str) -> Path | None:
+        """ساخت یا بازنویسی کامل نوت. فقط فایل md داخل والت."""
+        if not rel_path.lower().endswith(".md"):
+            rel_path = rel_path.rstrip("/") + ".md"
+        p = self._safe_path(rel_path)
+        if p is None:
+            return None
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content or "", encoding="utf-8")
+        self._after_change(f"bot: write {p.relative_to(self.root).as_posix()}")
+        return p
+
+    def append_note(self, rel_path: str, text: str) -> Path | None:
+        p = self._safe_path(rel_path)
+        if p is None or not p.is_file():
+            return None
+        with p.open("a", encoding="utf-8") as f:
+            f.write("\n" + (text or "").strip() + "\n")
+        self._after_change(f"bot: append {p.relative_to(self.root).as_posix()}")
+        return p
+
+    def rename_note(self, rel_path: str, new_name: str) -> Path | None:
+        p = self._safe_path(rel_path)
+        if p is None or not p.is_file():
+            return None
+        clean = INVALID_CHARS.sub("", (new_name or "").strip()).replace("/", "")
+        if not clean:
+            return None
+        if not clean.lower().endswith(".md"):
+            clean += ".md"
+        dest = p.parent / clean
+        if dest.exists():
+            return None
+        p.rename(dest)
+        self._after_change(f"bot: rename {rel_path} -> {dest.name}")
+        return dest
+
+    def move_note(self, rel_path: str, dest_folder: str) -> Path | None:
+        p = self._safe_path(rel_path)
+        folder = (dest_folder or "").strip().strip("/").replace("\\", "/")
+        if p is None or not p.is_file() or not folder or ".." in folder:
+            return None
+        dest_dir = self.root / folder
+        try:
+            dest_dir.resolve().relative_to(self.root.resolve())
+        except (ValueError, OSError):
+            return None
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / p.name
+        if dest.exists():
+            return None
+        p.rename(dest)
+        self._after_change(f"bot: move {rel_path} -> {folder}/")
+        return dest
+
+    def delete_note(self, rel_path: str) -> Path | None:
+        """حذف امن: نوت به .trash/ منتقل می‌شود (قابل بازیابی)، پاک دائم نمی‌شود."""
+        if rel_path.strip().rstrip("/") in ("Tasks/Todo.md", "Todo.md"):
+            return None  # تودولیست اصلی را نمی‌شود حذف کرد
+        p = self._safe_path(rel_path)
+        if p is None or not p.is_file():
+            return None
+        trash = self.root / ".trash" / self.now().strftime("%Y-%m-%d")
+        trash.mkdir(parents=True, exist_ok=True)
+        dest = trash / p.name
+        counter = 2
+        while dest.exists():
+            dest = trash / f"{p.stem}-{counter}{p.suffix}"
+            counter += 1
+        p.rename(dest)
+        self._after_change(f"bot: trash {rel_path}")
+        return dest
+
+    def make_folder(self, folder: str) -> Path | None:
+        folder = (folder or "").strip().strip("/").replace("\\", "/")
+        if not folder or ".." in folder or folder.startswith("."):
+            return None
+        d = self.root / folder
+        try:
+            d.resolve().relative_to(self.root.resolve())
+        except (ValueError, OSError):
+            return None
+        d.mkdir(parents=True, exist_ok=True)
+        self._after_change(f"bot: mkdir {folder}")
+        return d
+
+    def remove_folder(self, folder: str) -> bool:
+        """فقط پوشه خالی حذف می‌شود؛ غیرخالی → False."""
+        folder = (folder or "").strip().strip("/")
+        if not folder or folder in [f.name for f in self.root.iterdir() if False]:
+            return False
+        d = self._safe_path(folder)
+        if d is None or not d.is_dir():
+            return False
+        try:
+            d.rmdir()  # فقط اگر خالی باشد موفق می‌شود
+        except OSError:
+            return False
+        self._after_change(f"bot: rmdir {folder}")
+        return True
+
+    def list_notes(self, folder: str | None = None, limit: int = 50) -> list[str]:
+        base = self.root if not folder else self._safe_path(folder.strip().strip("/"))
+        if base is None or not base.is_dir():
+            return []
+        out = []
+        for md in sorted(base.rglob("*.md")):
+            if ".trash" in md.parts or ".git" in md.parts:
+                continue
+            out.append(md.relative_to(self.root).as_posix())
+            if len(out) >= limit:
+                break
+        return out
+
     # ---------- تودو ----------
 
     @property

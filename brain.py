@@ -22,6 +22,25 @@ from config import settings
 
 log = logging.getLogger(__name__)
 
+# حافظه والت (lazy import تا تست‌ها بدون والت هم کار کنند)
+_vault_memory_provider = None
+
+
+def set_memory_provider(fn) -> None:
+    """bot.py این را ست می‌کند تا brain به حافظه والت دسترسی داشته باشد."""
+    global _vault_memory_provider
+    _vault_memory_provider = fn
+
+
+def _vault_memory() -> str:
+    if _vault_memory_provider is None:
+        return "حافظه والت در دسترس نیست."
+    try:
+        return _vault_memory_provider() or "والت هنوز نوتی ندارد."
+    except Exception as exc:
+        log.warning("memory provider failed: %s", exc)
+        return "حافظه والت در دسترس نیست."
+
 SYSTEM_PROMPT = """تو دستیار هوشمند یک کاربر فارسی‌زبان هستی که پیام‌هایش را به یادداشت‌های Obsidian تبدیل می‌کنی.
 
 برای هر پیام، فقط و فقط یک JSON معتبر با همین کلیدها برگردان (بدون توضیح اضافه، بدون ```):
@@ -50,6 +69,32 @@ SYSTEM_PROMPT = """تو دستیار هوشمند یک کاربر فارسی‌�
 - زمان اکنون: {now} (منطقه {tz}). تاریخ‌های نسبی مثل «فردا ساعت ۸ صبح» را نسبت به همین زمان به ISO تبدیل کن.
 - body را با تیتر، بولت و مرتب بنویس. ایموجی نزن.
 - keywords: ۳ تا ۷ کلمه مهم پیام برای پیدا کردن نوت‌های مرتبط قدیمی.
+- اگر پیام به نوت خاصی اشاره دارد (اسم، موضوع)، حتماً همان path را در related_paths بگذار.
+- فقط پوشه‌های موجود را پیشنهاد بده؛ اگر موضوع به هیچ‌کدام نمی‌خورد folder را Inbox بگذار.
+
+## حافظه والت (کل نوت‌های کاربر — حتماً بخوان و استفاده کن)
+{memory}
+
+برای هر پیام، فقط و فقط یک JSON معتبر با همین کلیدها برگردان (بدون توضیح اضافه، بدون ```):
+{
+  "type": "class" | "event" | "review" | "task" | "reminder" | "idea" | "log" | "question" | "manage" | "chat",
+  "title": "عنوان کوتاه فارسی برای نوت",
+  "folder": "Classes" | "Events" | "Reviews" | "Tasks" | "Reminders" | "Ideas" | "Journal" | "Inbox",
+  "body": "متن تمیز و ساخت‌یافته به مارک‌داون فارسی",
+  "tags": ["تگ۱", "تگ۲"],
+  "keywords": ["کلمات کلیدی برای لینک‌سازی به نوت‌های قدیمی"],
+  "related_paths": ["مسیر دقیق نوت‌های مرتبط از حافظه، مثل Journal/2026-09-10-xxx.md"],
+  "due": "تاریخ سررسید ISO مثل 2026-09-10T08:00:00 یا null",
+  "remind_at": "زمان یادآوری ISO مثل 2026-09-10T08:00:00 یا null",
+  "tracker": true یا false (آیا در فایل ترکر روزانه هم ثبت شود؟),
+  "reply": "پاسخ کوتاه و صمیمی به کاربر به فارسی",
+  "manage_op": "اگر type=manage است: یکی از read | write | append | rename | move | delete | mkdir | rmdir | list، وگرنه null",
+  "manage_args": "اگر type=manage است: آبجکت آرگومان‌ها (path, content, new_path, folder)، وگرنه null"
+}
+
+انواع جدید:
+- manage: دستور مدیریتی والت («این نوت را پاک کن»، «پوشه X بساز»، «متن Y را به نوت Z اضافه کن»، «نوت را به پوشه A منتقل کن»). manage_op و manage_args را دقیق پر کن.
+- chat: گفت‌وگوی عادی یا نظر درباره پیش‌نویس («خوبه»، «عنوان را عوض کن»، «نه، پوشه را عوض کن»). چیزی ذخیره نکن؛ فقط در reply جواب بده.
 """
 
 _client = None
@@ -80,7 +125,10 @@ def _system_text() -> str:
     # با آکولاد دارد و format آن‌ها را با placeholder اشتباه می‌گیرد
     # (همین باگ باعث KeyError روی "type" و fallback دائمی بود).
     now = datetime.now(ZoneInfo(settings.timezone)).isoformat(timespec="minutes")
-    return SYSTEM_PROMPT.replace("{now}", now).replace("{tz}", settings.timezone)
+    return (SYSTEM_PROMPT
+            .replace("{now}", now)
+            .replace("{tz}", settings.timezone)
+            .replace("{memory}", _vault_memory()))
 
 
 def _get_client():
@@ -140,6 +188,34 @@ def analyze(text: str) -> dict:
         return fallback
 
 
+def revise_draft(draft_result: dict, raw_text: str, feedback: str) -> dict | None:
+    """نظر کاربر را روی آخرین پیش‌نویس اعمال کن. خروجی: نتیجه به‌روزشده یا None."""
+    if genai is None or not settings.gemini_api_key:
+        return None
+    prompt = (
+        "یک پیش‌نویس نوت Obsidian هست که کاربر درباره‌اش نظر داده. "
+        "پیش‌نویس به‌روزشده را با همان فرمت JSON قبلی برگردان (فقط JSON، بدون ```).\n\n"
+        f"متن اصلی کاربر: {raw_text}\n\n"
+        f"پیش‌نویس فعلی: {json.dumps(draft_result, ensure_ascii=False)}\n\n"
+        f"نظر جدید کاربر: {feedback}\n\n"
+        "اگر نظر ربطی به پیش‌نویس ندارد، دقیقاً همین را برگردان: {\"unrelated\": true}"
+    )
+    try:
+        raw = _generate_text(prompt, json_mode=True)
+        data = json.loads(_strip_fences(raw), strict=False)
+        if not isinstance(data, dict) or data.get("unrelated"):
+            return None
+        merged = dict(draft_result)
+        for key in ("title", "folder", "body", "tags", "keywords", "related_paths",
+                    "due", "remind_at", "tracker", "reply", "type"):
+            if key in data and data[key] not in (None, "", []):
+                merged[key] = data[key]
+        return _normalize(merged, raw_text)
+    except Exception as exc:
+        log.warning("revise failed: %s", exc)
+        return None
+
+
 def ask(question: str) -> str:
     """گفت‌وگوی آزاد (برای type=question هم استفاده می‌شود)."""
     if genai is None or not settings.gemini_api_key:
@@ -155,8 +231,12 @@ def ask(question: str) -> str:
 
 
 def _normalize(data: dict, original: str) -> dict:
-    valid_types = {"class", "event", "review", "task", "reminder", "idea", "log", "question"}
+    valid_types = {"class", "event", "review", "task", "reminder", "idea", "log",
+                   "question", "manage", "chat"}
     valid_folders = {"Classes", "Events", "Reviews", "Tasks", "Reminders", "Ideas", "Journal", "Inbox"}
+    manage_ops = {"read", "write", "append", "rename", "move", "delete", "mkdir", "rmdir", "list"}
+    op = data.get("manage_op") if data.get("manage_op") in manage_ops else None
+    args = data.get("manage_args") if isinstance(data.get("manage_args"), dict) else None
     out = {
         "type": data.get("type") if data.get("type") in valid_types else "log",
         "title": str(data.get("title") or original[:40]).strip(),
@@ -164,11 +244,17 @@ def _normalize(data: dict, original: str) -> dict:
         "body": str(data.get("body") or original).strip(),
         "tags": [str(t) for t in (data.get("tags") or [])][:6],
         "keywords": [str(k) for k in (data.get("keywords") or [])][:8],
+        "related_paths": [str(p) for p in (data.get("related_paths") or [])][:5],
         "due": data.get("due"),
         "remind_at": data.get("remind_at"),
         "tracker": bool(data.get("tracker", False)),
         "reply": str(data.get("reply") or "ذخیره شد ✅").strip(),
+        "manage_op": op,
+        "manage_args": args or {},
     }
+    # manage بدون عملیات معتبر → به chat تبدیل کن تا چیزی خراب نشود
+    if out["type"] == "manage" and not op:
+        out["type"] = "chat"
     return out
 
 
