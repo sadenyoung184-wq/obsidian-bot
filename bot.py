@@ -57,9 +57,9 @@ def _draft_preview(result: dict, num: int) -> str:
     return "\n".join(lines)
 
 
-def _commit_result(chat_id: int, result: dict) -> tuple[str, str]:
+def _commit_result(chat_id: int, result: dict, push: bool = True) -> tuple[str, str]:
     """یک نتیجه تاییدشده را واقعاً ذخیره کن. خروجی: (نام فایل، خط یادآور)."""
-    path = vault.save_note(result)
+    path = vault.save_note(result, push=push)
     try:
         refresh_index(vault.root)
     except Exception:
@@ -70,8 +70,14 @@ def _commit_result(chat_id: int, result: dict) -> tuple[str, str]:
             chat_id=chat_id,
             text=f"{result['title']}\n{(result.get('body') or '')[:300]}",
             remind_at=result["remind_at"],
+            repeat=result.get("repeat"),
         )
-        extra = " ⏰ یادآوری تنظیم شد." if ok else " ⚠️ زمان یادآوری معتبر نبود؛ فقط ذخیره شد."
+        if ok:
+            extra = (" 🔁 یادآوری روزانه تنظیم شد." if result.get("repeat") == "daily"
+                     else " 🔁 یادآوری هفتگی تنظیم شد." if result.get("repeat") == "weekly"
+                     else " ⏰ یادآوری تنظیم شد.")
+        else:
+            extra = " ⚠️ زمان یادآوری معتبر نبود؛ فقط ذخیره شد."
     return path.name, extra
 
 
@@ -180,6 +186,8 @@ async def _commit_all(message: Message) -> None:
         return
     status = await message.answer(f"⏳ ثبت {len(items)} مورد...")
     done, reminds, managed = 0, 0, 0
+    # ثبت دسته‌ای: همه نوت‌ها بدون پوش، آخرش یک پوش — سریع‌تر و تمیزتر
+    pending_sync = False
     for item in items:
         try:
             res = item["result"]
@@ -189,13 +197,22 @@ async def _commit_all(message: Message) -> None:
                 await message.answer(out[:4000])
                 managed += 1
             else:
-                name, extra = await asyncio.to_thread(_commit_result, message.chat.id, res)
+                name, extra = await asyncio.to_thread(_commit_result, message.chat.id, res, False)
+                pending_sync = True
                 done += 1
                 if "یادآوری تنظیم شد" in extra:
                     reminds += 1
         except Exception as exc:
             log.exception("commit failed")
             await message.answer(f"⚠️ یکی ثبت نشد: {exc}")
+    if pending_sync:
+        try:
+            from git_sync import sync_changes
+            from memory import refresh_index as _refresh
+            await asyncio.to_thread(_refresh, vault.root)
+            await asyncio.to_thread(sync_changes, vault.root, f"bot: batch {done} notes")
+        except Exception:
+            log.warning("batch sync failed", exc_info=True)
     drafts.clear(message.chat.id)
     bits = []
     if done:
@@ -228,6 +245,23 @@ async def cmd_memory(message: Message):
         await message.answer(f"خطا در بازسازی حافظه: {exc}")
 
 
+@dp.message(Command("search"))
+async def cmd_search(message: Message):
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("مثال: /search کلسیم هیدروکساید")
+        return
+    hits = await asyncio.to_thread(vault.search, parts[1].strip())
+    if not hits:
+        await message.answer("🔍 چیزی پیدا نکردم.")
+        return
+    lines = ["🔍 نتایج:\n"]
+    for h in hits:
+        lines.append(f"• `{h['path']}`\n  {h['snippet'][:180]}...")
+    lines.append("\nبرای خواندن کامل: /read مسیر")
+    await message.answer("\n".join(lines)[:4000])
+
+
 @dp.message(Command("notes"))
 async def cmd_notes(message: Message):
     parts = (message.text or "").split(maxsplit=1)
@@ -237,6 +271,48 @@ async def cmd_notes(message: Message):
         await message.answer("نوتی پیدا نکردم.")
         return
     await message.answer("📚 نوت‌ها:\n\n" + "\n".join(f"- `{p}`" for p in items[:40]))
+
+
+@dp.message(Command("reminders"))
+async def cmd_reminders(message: Message):
+    items = await asyncio.to_thread(reminders.list_upcoming, message.chat.id)
+    if not items:
+        await message.answer("⏰ یادآور فعالی نداری.")
+        return
+    lines = ["⏰ یادآورهای فعال:\n"]
+    for i, r in enumerate(items[:20], 1):
+        lines.append(f"{i}. {r['repeat']} {r['text'][:100]}\n   بعدی: {r['next'][:16]} — `{r['id']}`")
+    lines.append("\nلغو: /unremind <شماره>")
+    await message.answer("\n".join(lines)[:4000])
+
+
+@dp.message(Command("unremind"))
+async def cmd_unremind(message: Message):
+    parts = (message.text or "").split()
+    items = await asyncio.to_thread(reminders.list_upcoming, message.chat.id)
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.answer("مثال: /unremind 1 (فهرست: /reminders)")
+        return
+    idx = int(parts[1]) - 1
+    if idx < 0 or idx >= len(items):
+        await message.answer("چنین یادآوری نیست. فهرست: /reminders")
+        return
+    ok = await asyncio.to_thread(reminders.cancel, items[idx]["id"])
+    await message.answer("🗑 یادآور لغو شد." if ok else "لغو نشد.")
+
+
+@dp.message(Command("morning"))
+async def cmd_morning(message: Message):
+    from digest import morning_digest
+    text = await asyncio.to_thread(morning_digest, vault, reminders, message.chat.id)
+    await message.answer(text[:4000])
+
+
+@dp.message(Command("week"))
+async def cmd_week(message: Message):
+    from digest import weekly_digest
+    text = await asyncio.to_thread(weekly_digest, vault, reminders, message.chat.id)
+    await message.answer(text[:4000])
 
 
 @dp.message(Command("read"))
@@ -384,13 +460,35 @@ async def handle_document(message: Message):
         if dest is None:
             await status.edit_text(f"❌ فرمت `{ext or '?'}` پشتیبانی نمی‌شود.")
             return
-        await status.delete()
         rel = dest.relative_to(vault.root).as_posix()
-        note_text = f"فایل: {name} ({size_mb:.1f}MB)\n"
-        if caption:
-            note_text += f"توضیح: {caption}\n"
-        note_text += f"\n![[{rel}]]"
-        await _process_text(message, note_text)
+        # استخراج متن PDF/Word/txt برای خلاصه‌سازی هوشمند
+        extracted = ""
+        if ext in (".pdf", ".docx", ".txt", ".md", ".csv"):
+            await status.edit_text("📖 دارم متن فایل را می‌خوانم...")
+            try:
+                from doc_text import extract_text
+                extracted = await asyncio.to_thread(extract_text, dest)
+            except Exception as exc:
+                log.warning("extract failed: %s", exc)
+        await status.delete()
+        if extracted:
+            summary_prompt = (
+                f"فایل «{name}» — توضیح کاربر: {caption or 'ندارد'}\n\n"
+                f"متن استخراج‌شده (شروع):\n{extracted[:8000]}"
+            )
+            await _process_text(
+                message,
+                f"{summary_prompt}\n\nفایل اصلی: [[{rel}]]\n"
+                "(متن بالا را خلاصه و ساخت‌یافته کن و لینک فایل را نگه دار)",
+            )
+        else:
+            note_text = f"فایل: {name} ({size_mb:.1f}MB)\n"
+            if caption:
+                note_text += f"توضیح: {caption}\n"
+            if ext == ".pdf":
+                note_text += "(متن قابل استخراج نبود — احتمالاً اسکن‌شده است؛ از OCR عکس استفاده کن)\n"
+            note_text += f"\n![[{rel}]]"
+            await _process_text(message, note_text)
     except Exception as exc:
         log.exception("document failed")
         await status.edit_text(f"خطا در ذخیره فایل: {exc}")
@@ -440,6 +538,23 @@ async def _process_text(message: Message, text: str) -> None:
         # --- دستور مدیریتی: اول نشان بده، با تایید اجرا کن ---
         if result.get("type") == "manage":
             await _handle_manage(message, status, text, result)
+            return
+
+        # --- جست‌وجو در نوت‌ها: بدون ذخیره، فقط نمایش نتایج ---
+        if result.get("type") == "search":
+            query = " ".join(result.get("keywords") or []) or text
+            hits = await asyncio.to_thread(vault.search, query)
+            if not hits:
+                # اگر کلیدواژه خالی بود، با کل متن دوباره بگرد
+                hits = await asyncio.to_thread(vault.search, text)
+            if not hits:
+                await status.edit_text("🔍 چیزی درباره این موضوع در نوت‌هایت پیدا نکردم.")
+                return
+            lines = ["🔍 در نوت‌هایت پیدا کردم:\n"]
+            for h in hits:
+                lines.append(f"• `{h['path']}`\n  {h['snippet'][:180]}...")
+            lines.append("\nبرای خواندن کامل: /read مسیر")
+            await status.edit_text("\n".join(lines)[:4000])
             return
 
         # --- نوت عادی ---
@@ -560,6 +675,45 @@ def _transcribe(audio_bytes: bytes) -> str:
     return (resp.text or "").strip()
 
 
+def _schedule_digests() -> None:
+    """گزارش صبحگاهی (+ هفتگی جمعه‌شب) — فقط اگر DIGEST_CHAT_ID ست شده باشد."""
+    raw = (settings.digest_chat_id or "").strip()
+    if not raw.isdigit():
+        return
+    chat_id = int(raw)
+    try:
+        hh, mm = settings.digest_time.split(":")
+        hour, minute = int(hh), int(mm)
+    except (ValueError, AttributeError):
+        hour, minute = 7, 30
+
+    async def _send_morning() -> None:
+        from digest import morning_digest
+        try:
+            text = await asyncio.to_thread(morning_digest, vault, reminders, chat_id)
+            await bot.send_message(chat_id, text[:4000])
+            log.info("Morning digest sent")
+        except Exception as exc:
+            log.warning("morning digest failed: %s", exc)
+
+    async def _send_weekly() -> None:
+        from digest import weekly_digest
+        try:
+            text = await asyncio.to_thread(weekly_digest, vault, reminders, chat_id)
+            await bot.send_message(chat_id, text[:4000])
+            log.info("Weekly digest sent")
+        except Exception as exc:
+            log.warning("weekly digest failed: %s", exc)
+
+    reminders.scheduler.add_job(_send_morning, "cron", hour=hour, minute=minute,
+                                id="morning-digest", replace_existing=True)
+    if settings.weekly_digest:
+        reminders.scheduler.add_job(_send_weekly, "cron", day_of_week="thu",
+                                    hour=21, minute=0,
+                                    id="weekly-digest", replace_existing=True)
+    log.info("Digests scheduled at %02d:%02d for %s", hour, minute, chat_id)
+
+
 async def main() -> None:
     problems = settings.validate()
     if problems:
@@ -576,6 +730,7 @@ async def main() -> None:
     except Exception:
         log.warning("memory index failed", exc_info=True)
     reminders.start()
+    _schedule_digests()
     log.info("Bot started. Vault: %s", settings.vault_path)
     await dp.start_polling(bot)
 

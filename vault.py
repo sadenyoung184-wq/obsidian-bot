@@ -12,7 +12,7 @@ from config import settings
 
 log = logging.getLogger(__name__)
 
-FOLDERS = ["Inbox", "Classes", "Events", "Reviews", "Tasks", "Reminders", "Ideas", "Journal", "Tracker"]
+FOLDERS = ["Inbox", "Classes", "Events", "Reviews", "Tasks", "Reminders", "Ideas", "Journal", "Tracker", "Assets", "Files", "Templates"]
 
 INVALID_CHARS = re.compile(r'[\\/:"*?<>|#^\[\]]')
 
@@ -40,8 +40,9 @@ class ObsidianVault:
 
     # ---------- ذخیره نوت ----------
 
-    def save_note(self, result: dict) -> Path:
-        """نتیجه تحلیل brain را به یک فایل مارک‌داون تبدیل و ذخیره می‌کند."""
+    def save_note(self, result: dict, push: bool = True) -> Path:
+        """نتیجه تحلیل brain را به یک فایل مارک‌داون تبدیل و ذخیره می‌کند.
+        push=False یعنی پوش گیت را رد کن — برای ثبت دسته‌ای چند نوت با یک پوش."""
         folder = result.get("folder") or "Inbox"
         title = (result.get("title") or "بدون عنوان").strip()
         date_str = self.now().strftime("%Y-%m-%d")
@@ -76,11 +77,12 @@ class ObsidianVault:
             self.add_todo(title, due=result.get("due"), source=path.stem)
 
         # اگر سینک گیت فعال است، به گیت‌هاب پوش کن (خطا ربات را نمی‌خواباند)
-        try:
-            from git_sync import sync_changes
-            sync_changes(self.root, f"bot: {folder}/{path.name}")
-        except Exception:  # pragma: no cover
-            log.warning("git sync failed, continuing locally", exc_info=True)
+        if push:
+            try:
+                from git_sync import sync_changes
+                sync_changes(self.root, f"bot: {folder}/{path.name}")
+            except Exception:  # pragma: no cover
+                log.warning("git sync failed, continuing locally", exc_info=True)
 
         log.info("Note saved: %s", path)
         return path
@@ -89,7 +91,8 @@ class ObsidianVault:
         tags = " ".join(f"#{t}" for t in (result.get("tags") or []))
         lines = ["---", f'title: "{result.get("title")}"', f"date: {date_str} {time_str}",
                  f'type: {result.get("type")}', f'folder: {result.get("folder")}',
-                 f'tags: [{", ".join(result.get("tags") or [])}]']
+                 f'tags: [{", ".join(result.get("tags") or [])}]',
+                 "cssclasses: [fa-rtl]"]
         if result.get("due"):
             lines.append(f'due: {result.get("due")}')
         if result.get("remind_at"):
@@ -126,6 +129,40 @@ class ObsidianVault:
                 scored.append((score, md))
         scored.sort(key=lambda x: x[0], reverse=True)
         return [p for _, p in scored[:limit]]
+
+    def search(self, query: str, limit: int = 5) -> list[dict]:
+        """جست‌وجوی کلیدواژه‌ای در نوت‌ها. خروجی: [{path, title, snippet, score}]."""
+        words = [w for w in re.findall(r"[؀-ۿ\w]{2,}", query or "") if len(w.strip()) >= 2]
+        stop = {"چی", "چیه", "چیست", "درباره", "بگو", "بده", "کنم", "کن", "را", "من",
+                "تو", "در", "به", "از", "که", "دارم", "است", "هست", "برای", "روی", "های"}
+        words = [w for w in words if w not in stop]
+        if not words:
+            return []
+        scored: list[tuple[int, Path]] = []
+        for md in self.root.rglob("*.md"):
+            if ".trash" in md.parts or ".git" in md.parts or "Tracker" in md.parts:
+                continue
+            try:
+                text = md.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            score = sum(text.count(w) * (3 if w in md.stem else 1) for w in words)
+            if score > 0:
+                scored.append((score, md))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        out = []
+        for score, md in scored[:limit]:
+            try:
+                text = md.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            flat = " ".join(text.split())
+            idx = min((flat.find(w) for w in words if w in flat), default=0)
+            start = max(0, idx - 80)
+            out.append({"path": md.relative_to(self.root).as_posix(),
+                        "title": md.stem, "snippet": flat[start:start + 250],
+                        "score": score})
+        return out
 
     def _add_backlinks(self, related: list[Path], new_note_name: str) -> None:
         link_line = f"- [[{new_note_name}]]"

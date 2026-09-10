@@ -32,6 +32,10 @@ class Settings:
     git_sync: bool = os.getenv("GIT_SYNC_ENABLED", "false").lower() in ("1", "true", "yes")
     git_repo_url: str = os.getenv("GIT_REPO_URL", "")
     git_branch: str = os.getenv("GIT_BRANCH", "main")
+    # --- گزارش خودکار ---
+    digest_chat_id: str = os.getenv("DIGEST_CHAT_ID", "")  # آیدی عددی برای گزارش صبحگاهی
+    digest_time: str = os.getenv("DIGEST_TIME", "07:30")  # ساعت ارسال (HH:MM)
+    weekly_digest: bool = os.getenv("WEEKLY_DIGEST", "true").lower() in ("1", "true", "yes")
 
     def validate(self) -> list[str]:
         problems: list[str] = []

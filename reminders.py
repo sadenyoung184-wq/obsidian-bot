@@ -32,6 +32,22 @@ def _parse_dt(value: str | None) -> datetime | None:
         return None
 
 
+REPEAT_WORDS = ("هر روز", "روزانه", "every day", "daily",
+                "هر هفته", "هفتگی", "weekly")
+
+FA_REPEAT_WORDS = ("هر روز", "روزانه", "هر هفته", "هفتگی")
+
+
+def detect_repeat(text: str) -> str | None:
+    """اگر متن یادآور تکرارشونده است، نوعش را برگردان: daily | weekly | None."""
+    t = (text or "")
+    if "هر روز" in t or "روزانه" in t or "every day" in t.lower() or "daily" in t.lower():
+        return "daily"
+    if "هر هفته" in t or "هفتگی" in t or "weekly" in t.lower():
+        return "weekly"
+    return None
+
+
 class ReminderService:
     def __init__(self, bot, vault):
         self.bot = bot
@@ -40,12 +56,29 @@ class ReminderService:
 
     # ---------- API ----------
 
-    def schedule(self, chat_id: int, text: str, remind_at: str | None) -> bool:
-        """یادآور جدید ثبت کن. اگر زمان معتبر نباشد False برمی‌گرداند."""
+    def schedule(self, chat_id: int, text: str, remind_at: str | None,
+                   repeat: str | None = None) -> bool:
+        """یادآور جدید ثبت کن. اگر زمان معتبر نباشد False برمی‌گرداند.
+        repeat: None | "daily" | "weekly" — اگر None باشد از متن حدس زده می‌شود."""
         dt = _parse_dt(remind_at)
         if dt is None or dt <= datetime.now(ZoneInfo(settings.timezone)):
             return False
+        rep = repeat or detect_repeat(text)
         job_id = f"{chat_id}-{int(dt.timestamp())}-{abs(hash(text)) % 10_000}"
+        if rep in ("daily", "weekly"):
+            # تکرارشونده: هر روز / هر هفته سر همان ساعت
+            self.scheduler.add_job(
+                self._fire,
+                "cron",
+                hour=dt.hour, minute=dt.minute,
+                day_of_week="*" if rep == "daily" else dt.strftime("%a").lower()[:3],
+                id=f"{job_id}-{rep}",
+                replace_existing=True,
+                kwargs={"chat_id": chat_id, "text": f"{text} (🔁 {'روزانه' if rep == 'daily' else 'هفتگی'})"},
+            )
+            self._persist(chat_id, text, dt, repeat=rep)
+            log.info("Repeating reminder (%s) for %s", rep, text[:40])
+            return True
         self.scheduler.add_job(
             self._fire,
             "date",
@@ -74,9 +107,45 @@ class ReminderService:
 
     # ---------- ماندگاری ----------
 
-    def _persist(self, chat_id: int, text: str, dt: datetime) -> None:
+    def list_upcoming(self, chat_id: int | None = None) -> list[dict]:
+        """یادآورهای آینده (برای گزارش صبحگاهی و /reminders)."""
+        out = []
+        for job in self.scheduler.get_jobs():
+            args = job.kwargs or {}
+            if chat_id is not None and args.get("chat_id") != chat_id:
+                continue
+            if "ReminderService._fire" not in str(job.func):
+                continue
+            out.append({"id": job.id, "text": str(args.get("text", "")),
+                        "next": job.next_run_time.isoformat() if job.next_run_time else "?",
+                        "repeat": "🔁" if job.trigger.__class__.__name__ == "CronTrigger" else "⏰"})
+        out.sort(key=lambda r: r["next"])
+        return out
+
+    def cancel(self, job_id: str) -> bool:
+        try:
+            self.scheduler.remove_job(job_id)
+        except Exception:
+            return False
+        # از فایل هم پاک کن
+        if STORE.exists():
+            kept = []
+            for line in STORE.read_text(encoding="utf-8").splitlines():
+                try:
+                    rec = json.loads(line)
+                    stamp = str(int(_parse_dt(rec.get("at")).timestamp()))
+                    if stamp not in job_id:
+                        kept.append(line)
+                except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
+                    continue
+            STORE.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+        return True
+
+    def _persist(self, chat_id: int, text: str, dt: datetime, repeat: str | None = None) -> None:
         STORE.parent.mkdir(parents=True, exist_ok=True)
         record = {"chat_id": chat_id, "text": text, "at": dt.isoformat()}
+        if repeat:
+            record["repeat"] = repeat
         with STORE.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -92,6 +161,18 @@ class ReminderService:
             except json.JSONDecodeError:
                 continue
             dt = _parse_dt(rec.get("at"))
+            rep = rec.get("repeat")
+            if rep in ("daily", "weekly"):
+                # تکرارشونده‌ها تاریخ انقضا ندارند — همیشه برگردان
+                self.scheduler.add_job(
+                    self._fire, "cron",
+                    hour=dt.hour if dt else 8, minute=dt.minute if dt else 0,
+                    day_of_week="*" if rep == "daily" else (dt.strftime("%a").lower()[:3] if dt else "sat"),
+                    kwargs={"chat_id": rec["chat_id"],
+                            "text": f"{rec['text']} (🔁 {'روزانه' if rep == 'daily' else 'هفتگی'})"},
+                )
+                kept.append(line)
+                continue
             if dt is None or dt <= now:
                 continue
             self.scheduler.add_job(

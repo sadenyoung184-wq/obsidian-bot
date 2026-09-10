@@ -62,12 +62,15 @@ SYSTEM_PROMPT = """تو دستیار هوشمند یک کاربر فارسی‌�
 - event: جلسه، قرار، همایش، رویداد با تاریخ → folder=Events، due=تاریخ رویداد
 - review: مرور، جمع‌بندی، بازبینی → folder=Reviews
 - task: کار، باید انجام شود، تودو → folder=Tasks، due اگر تاریخ دارد
-- reminder: «یادم بنداز»، «یادآوری کن» → folder=Reminders، remind_at حتماً پر شود
+- reminder: «یادم بنداز»، «یادآوری کن» → folder=Reminders، remind_at حتماً پر شود. اگر «هر روز/روزانه» گفت repeat را daily و اگر «هر هفته/هفتگی» گفت weekly بگذار (وگرنه null)
 - idea: ایده، به ذهنم رسید → folder=Ideas
 - log: خاطره روزانه، اتفاق امروز، حس و حال → folder=Journal، tracker=true
 - question: سوال از تو → folder=Inbox، body=خلاصه سوال و جواب، و جواب کامل را در reply بنویس
 - زمان اکنون: {now} (منطقه {tz}). تاریخ‌های نسبی مثل «فردا ساعت ۸ صبح» را نسبت به همین زمان به ISO تبدیل کن.
 - body را با تیتر، بولت و مرتب بنویس. ایموجی نزن.
+- برای خوانایی در Obsidian از کال‌اوت استفاده کن: خلاصه در > [!summary]- ...، نکته امتحانی در > [!warning]- ...، تصمیم در > [!success]- ...، نقل‌قول در > [!quote]- ... .
+- body را فقط با همین قالب‌های آماده هماهنگ کن (بدون فرانت‌متر — فرانت‌متر را سیستم می‌سازد):
+  کلاس → # 📚 تیتر، کال‌اوت خلاصه درس، ## 📝 جزوه، ## ⭐ نکات مهم امتحانی؛ جلسه → جدول زمان/افراد/مکان، ## 🎯 دستور جلسه، ## 📌 تصمیم‌ها، ## ✅ اقدام‌ها؛ مرور → کال‌اوت جمع‌بندی، ## 📌 نکات کلیدی، ## ❓ سؤال‌های باز؛ ایده → کال‌اوت ایده، ## چرا جذاب است؟، ## قدم بعدی؛ ژورنال → کال‌اوت حس امروز، ## اتفاق‌های امروز، ## ✅ کارهای انجام‌شده، ## 💭 فکر و حس.
 - keywords: ۳ تا ۷ کلمه مهم پیام برای پیدا کردن نوت‌های مرتبط قدیمی.
 - اگر پیام به نوت خاصی اشاره دارد (اسم، موضوع)، حتماً همان path را در related_paths بگذار.
 - فقط پوشه‌های موجود را پیشنهاد بده؛ اگر موضوع به هیچ‌کدام نمی‌خورد folder را Inbox بگذار.
@@ -77,7 +80,7 @@ SYSTEM_PROMPT = """تو دستیار هوشمند یک کاربر فارسی‌�
 
 برای هر پیام، فقط و فقط یک JSON معتبر با همین کلیدها برگردان (بدون توضیح اضافه، بدون ```):
 {
-  "type": "class" | "event" | "review" | "task" | "reminder" | "idea" | "log" | "question" | "manage" | "chat",
+  "type": "class" | "event" | "review" | "task" | "reminder" | "idea" | "log" | "question" | "manage" | "chat" | "search",
   "title": "عنوان کوتاه فارسی برای نوت",
   "folder": "Classes" | "Events" | "Reviews" | "Tasks" | "Reminders" | "Ideas" | "Journal" | "Inbox",
   "body": "متن تمیز و ساخت‌یافته به مارک‌داون فارسی",
@@ -87,6 +90,7 @@ SYSTEM_PROMPT = """تو دستیار هوشمند یک کاربر فارسی‌�
   "due": "تاریخ سررسید ISO مثل 2026-09-10T08:00:00 یا null",
   "remind_at": "زمان یادآوری ISO مثل 2026-09-10T08:00:00 یا null",
   "tracker": true یا false (آیا در فایل ترکر روزانه هم ثبت شود؟),
+  "repeat": "فقط برای reminder: daily یا weekly یا null",
   "reply": "پاسخ کوتاه و صمیمی به کاربر به فارسی",
   "manage_op": "اگر type=manage است: یکی از read | write | append | rename | move | delete | mkdir | rmdir | list، وگرنه null",
   "manage_args": "اگر type=manage است: آبجکت آرگومان‌ها (path, content, new_path, folder)، وگرنه null"
@@ -95,6 +99,7 @@ SYSTEM_PROMPT = """تو دستیار هوشمند یک کاربر فارسی‌�
 انواع جدید:
 - manage: دستور مدیریتی والت («این نوت را پاک کن»، «پوشه X بساز»، «متن Y را به نوت Z اضافه کن»، «نوت را به پوشه A منتقل کن»). manage_op و manage_args را دقیق پر کن.
 - chat: گفت‌وگوی عادی یا نظر درباره پیش‌نویس («خوبه»، «عنوان را عوض کن»، «نه، پوشه را عوض کن»). چیزی ذخیره نکن؛ فقط در reply جواب بده.
+- search: کاربر دنبال نوت‌های قبلی‌اش می‌گردد («درباره X چی دارم؟»، «جزوه Y را پیدا کن»). چیزی ذخیره نکن؛ query را با کلمات کلیدی موضوع پر کن و در reply بنویس «دارم می‌گردم...». جست‌وجوی واقعی را سیستم انجام می‌دهد.
 """
 
 _client = None
@@ -318,7 +323,7 @@ def ask(question: str) -> str:
 
 def _normalize(data: dict, original: str) -> dict:
     valid_types = {"class", "event", "review", "task", "reminder", "idea", "log",
-                   "question", "manage", "chat"}
+                   "question", "manage", "chat", "search"}
     valid_folders = {"Classes", "Events", "Reviews", "Tasks", "Reminders", "Ideas", "Journal", "Inbox"}
     manage_ops = {"read", "write", "append", "rename", "move", "delete", "mkdir", "rmdir", "list"}
     op = data.get("manage_op") if data.get("manage_op") in manage_ops else None
@@ -334,6 +339,7 @@ def _normalize(data: dict, original: str) -> dict:
         "due": data.get("due"),
         "remind_at": data.get("remind_at"),
         "tracker": bool(data.get("tracker", False)),
+        "repeat": data.get("repeat") if data.get("repeat") in ("daily", "weekly") else None,
         "reply": str(data.get("reply") or "ذخیره شد ✅").strip(),
         "manage_op": op,
         "manage_args": args or {},
