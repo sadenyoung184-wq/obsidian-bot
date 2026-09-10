@@ -39,7 +39,7 @@ python bot.py
 | `TELEGRAM_TOKEN` | توکن ربات از BotFather |
 | `ALLOWED_USER_IDS` | آیدی‌های مجاز با کاما (خالی = همه) |
 | `GEMINI_API_KEY` | کلید رایگان Gemini |
-| `GEMINI_MODEL` | مدل (پیش‌فرض `gemini-2.5-flash-latest`) |
+| `GEMINI_MODEL` | مدل (پیش‌فرض `gemini-3-flash-preview`) |
 | `VAULT_PATH` | مسیر پوشه والت Obsidian |
 | `TIMEZONE` | منطقه زمانی (پیش‌فرض `Asia/Tehran`) |
 | `GIT_SYNC_ENABLED` | `true` فقط روی هاست ابری، روی لپ‌تاپ `false` |

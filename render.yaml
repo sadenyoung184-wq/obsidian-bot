@@ -16,7 +16,7 @@ services:
       - key: GIT_REPO_URL
         sync: false
       - key: GEMINI_MODEL
-        value: gemini-2.5-flash-latest
+        value: gemini-3-flash-preview
       - key: VAULT_PATH
         value: ./MyVault
       - key: TIMEZONE

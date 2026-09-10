@@ -57,7 +57,7 @@ _client = None
 # مدل‌های Gemini مرتب بازنشسته می‌شوند؛ به ترتیب اولویت امتحان کن
 # تا با 404 خوردن یکی، بعدی خودکار تست شود و ربات روی fallback نماند.
 MODEL_CANDIDATES = [
-    "gemini-2.5-flash-latest",
+    "gemini-3-flash-preview",
     "gemini-2.5-flash",
     "gemini-2.0-flash-latest",
     "gemini-2.0-flash",
