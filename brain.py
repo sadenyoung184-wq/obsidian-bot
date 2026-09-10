@@ -54,6 +54,26 @@ SYSTEM_PROMPT = """تو دستیار هوشمند یک کاربر فارسی‌�
 
 _client = None
 
+# مدل‌های Gemini مرتب بازنشسته می‌شوند؛ به ترتیب اولویت امتحان کن
+# تا با 404 خوردن یکی، بعدی خودکار تست شود و ربات روی fallback نماند.
+MODEL_CANDIDATES = [
+    "gemini-2.5-flash-latest",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash-latest",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-flash",
+]
+
+
+def _candidate_models() -> list[str]:
+    """مدل تنظیم‌شده اول، بعد بقیه کاندیداها (بدون تکرار)."""
+    ordered = [settings.gemini_model] if settings.gemini_model else []
+    for m in MODEL_CANDIDATES:
+        if m not in ordered:
+            ordered.append(m)
+    return ordered
+
 
 def _system_text() -> str:
     # NOTE: از replace استفاده می‌کنیم نه format — چون خود پرامپت نمونه JSON
@@ -79,21 +99,39 @@ def _strip_fences(raw: str) -> str:
     return raw.strip()
 
 
+def _generate_text(contents, json_mode: bool):
+    """اولین مدل سالمی که جواب داد را برگردان؛ فقط 404 مدل بعدی را امتحان می‌کند."""
+    last_exc: Exception | None = None
+    for model in _candidate_models():
+        try:
+            resp = _get_client().models.generate_content(
+                model=model,
+                contents=contents,
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=_system_text(),
+                    **({"response_mime_type": "application/json"} if json_mode else {}),
+                ),
+            )
+            if model != settings.gemini_model:
+                log.info("Using fallback model: %s", model)
+            return resp.text or ""
+        except Exception as exc:
+            if "404" in str(exc) or "NOT_FOUND" in str(exc):
+                log.warning("Model %s not available, trying next", model)
+                last_exc = exc
+                continue
+            raise
+    raise last_exc or RuntimeError("no Gemini model available")
+
+
 def analyze(text: str) -> dict:
     """پیام کاربر را تحلیل کن و دیکشنری استاندارد برگردان."""
     fallback = _fallback(text)
     if not settings.gemini_api_key or genai is None:
         return fallback
     try:
-        resp = _get_client().models.generate_content(
-            model=settings.gemini_model,
-            contents=text,
-            config=genai_types.GenerateContentConfig(
-                system_instruction=_system_text(),
-                response_mime_type="application/json",
-            ),
-        )
-        data = json.loads(_strip_fences(resp.text or ""), strict=False)
+        raw = _generate_text(text, json_mode=True)
+        data = json.loads(_strip_fences(raw), strict=False)
         if not isinstance(data, dict):
             raise ValueError(f"expected JSON object, got: {str(data)[:100]}")
         return _normalize(data, text)
@@ -107,14 +145,10 @@ def ask(question: str) -> str:
     if genai is None or not settings.gemini_api_key:
         return "الان به هوش مصنوعی دسترسی ندارم، ولی پیامت را در Inbox ذخیره کردم. بعداً دوباره بپرس."
     try:
-        resp = _get_client().models.generate_content(
-            model=settings.gemini_model,
-            contents="به این سوال به فارسی، کوتاه و کاربردی جواب بده:\n" + question,
-            config=genai_types.GenerateContentConfig(
-                system_instruction=_system_text(),
-            ),
-        )
-        return (resp.text or "").strip()
+        return _generate_text(
+            "به این سوال به فارسی، کوتاه و کاربردی جواب بده:\n" + question,
+            json_mode=False,
+        ).strip()
     except Exception as exc:
         log.warning("Gemini ask failed: %s", exc)
         return "الان به هوش مصنوعی دسترسی ندارم، ولی پیامت را در Inbox ذخیره کردم. بعداً دوباره بپرس."
